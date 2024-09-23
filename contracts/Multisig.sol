@@ -80,6 +80,24 @@ contract Multisig {
         require(success, "Transaction execution failed");
     }
 
+    function withdraw(address payable _to, uint256 _amount) public {
+        require(isOwner[msg.sender], "Only owners can withdraw funds");
+        require(_amount > 0, "Withdrawal amount must be greater than 0");
+        require(_amount <= address(this).balance, "Insufficient balance");
+
+        // Create a new transaction for the withdrawal
+        transactionCount++;
+        Transaction storage newTransaction = transactions[transactionCount];
+        newTransaction.to = _to;
+        newTransaction.value = _amount;
+        newTransaction.data = "";
+        newTransaction.executed = false;
+        newTransaction.confirmationCount = 0;
+
+        emit TransactionCreated(transactionCount, msg.sender, _to, _amount, "");
+        emit WithdrawalRequested(transactionCount, msg.sender, _to, _amount);
+    }
+
     receive() external payable {
         emit Deposit(msg.sender, msg.value);
     }
@@ -89,4 +107,5 @@ contract Multisig {
     event TransactionExecuted(uint256 indexed transactionId);
     event Deposit(address indexed sender, uint256 amount);
     event ConfirmationRevoked(uint256 indexed transactionId, address indexed owner);
+    event WithdrawalRequested(uint256 indexed transactionId, address indexed requester, address to, uint256 amount);
 }

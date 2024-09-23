@@ -6,122 +6,84 @@ import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
 import { expect } from "chai";
 import hre from "hardhat";
 
-describe("Lock", function () {
+describe("Multisig", function () {
   // We define a fixture to reuse the same setup in every test.
-  // We use loadFixture to run this setup once, snapshot that state,
-  // and reset Hardhat Network to that snapshot in every test.
-  async function deployOneYearLockFixture() {
-    const ONE_YEAR_IN_SECS = 365 * 24 * 60 * 60;
-    const ONE_GWEI = 1_000_000_000;
+  async function deployMultisigFixture() {
+    const [owner, otherAccount, thirdAccount] = await hre.ethers.getSigners();
+    const quorum = 2;
+    const owners = [owner.address, otherAccount.address, thirdAccount.address];
 
-    const lockedAmount = ONE_GWEI;
-    const unlockTime = (await time.latest()) + ONE_YEAR_IN_SECS;
+    const Multisig = await hre.ethers.getContractFactory("Multisig");
+    const multisig = await Multisig.deploy(quorum, owners);
 
-    // Contracts are deployed using the first signer/account by default
-    const [owner, otherAccount] = await hre.ethers.getSigners();
-
-    const Lock = await hre.ethers.getContractFactory("Lock");
-    const lock = await Lock.deploy(unlockTime, { value: lockedAmount });
-
-    return { lock, unlockTime, lockedAmount, owner, otherAccount };
+    return { multisig, quorum, owners, owner, otherAccount, thirdAccount };
   }
 
   describe("Deployment", function () {
-    it("Should set the right unlockTime", async function () {
-      const { lock, unlockTime } = await loadFixture(deployOneYearLockFixture);
+    it("Should set the right quorum", async function () {
+      const { multisig, quorum } = await loadFixture(deployMultisigFixture);
 
-      expect(await lock.unlockTime()).to.equal(unlockTime);
+      expect(await multisig.quorum()).to.equal(quorum);
     });
 
-    it("Should set the right owner", async function () {
-      const { lock, owner } = await loadFixture(deployOneYearLockFixture);
+    it("Should set the right owners", async function () {
+      const { multisig, owners } = await loadFixture(deployMultisigFixture);
 
-      expect(await lock.owner()).to.equal(owner.address);
-    });
-
-    it("Should receive and store the funds to lock", async function () {
-      const { lock, lockedAmount } = await loadFixture(
-        deployOneYearLockFixture
-      );
-
-      expect(await hre.ethers.provider.getBalance(lock.target)).to.equal(
-        lockedAmount
-      );
-    });
-
-    it("Should fail if the unlockTime is not in the future", async function () {
-      // We don't use the fixture here because we want a different deployment
-      const latestTime = await time.latest();
-      const Lock = await hre.ethers.getContractFactory("Lock");
-      await expect(Lock.deploy(latestTime, { value: 1 })).to.be.revertedWith(
-        "Unlock time should be in the future"
-      );
+      for (let i = 0; i < owners.length; i++) {
+        expect(await multisig.owners(i)).to.equal(owners[i]);
+        expect(await multisig.isOwner(owners[i])).to.be.true;
+      }
     });
   });
 
-  describe("Withdrawals", function () {
-    describe("Validations", function () {
-      it("Should revert with the right error if called too soon", async function () {
-        const { lock } = await loadFixture(deployOneYearLockFixture);
+  describe("Transactions", function () {
+    it("Should create a transaction", async function () {
+      const { multisig, owner, otherAccount } = await loadFixture(deployMultisigFixture);
+      const value = hre.ethers.parseEther("1");
+      const data = "0x";
 
-        await expect(lock.withdraw()).to.be.revertedWith(
-          "You can't withdraw yet"
-        );
-      });
+      await expect(multisig.createTransaction(otherAccount.address, value, data))
+        .to.emit(multisig, "TransactionCreated")
+        .withArgs(1, owner.address, otherAccount.address, value, data);
 
-      it("Should revert with the right error if called from another account", async function () {
-        const { lock, unlockTime, otherAccount } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        // We can increase the time in Hardhat Network
-        await time.increaseTo(unlockTime);
-
-        // We use lock.connect() to send a transaction from another account
-        await expect(lock.connect(otherAccount).withdraw()).to.be.revertedWith(
-          "You aren't the owner"
-        );
-      });
-
-      it("Shouldn't fail if the unlockTime has arrived and the owner calls it", async function () {
-        const { lock, unlockTime } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        // Transactions are sent using the first signer by default
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw()).not.to.be.reverted;
-      });
+      const transaction = await multisig.transactions(1);
+      expect(transaction.to).to.equal(otherAccount.address);
+      expect(transaction.value).to.equal(value);
+      expect(transaction.data).to.equal(data);
+      expect(transaction.executed).to.be.false;
+      expect(transaction.confirmationCount).to.equal(0);
     });
 
-    describe("Events", function () {
-      it("Should emit an event on withdrawals", async function () {
-        const { lock, unlockTime, lockedAmount } = await loadFixture(
-          deployOneYearLockFixture
-        );
+    it("Should confirm a transaction", async function () {
+      const { multisig, owner, otherAccount } = await loadFixture(deployMultisigFixture);
+      await multisig.createTransaction(otherAccount.address, 0, "0x");
 
-        await time.increaseTo(unlockTime);
+      await expect(multisig.confirmTransaction(1))
+        .to.emit(multisig, "TransactionConfirmed")
+        .withArgs(1, owner.address);
 
-        await expect(lock.withdraw())
-          .to.emit(lock, "Withdrawal")
-          .withArgs(lockedAmount, anyValue); // We accept any value as `when` arg
-      });
+      const transaction = await multisig.transactions(1);
+      expect(transaction.confirmationCount).to.equal(1);
     });
 
-    describe("Transfers", function () {
-      it("Should transfer the funds to the owner", async function () {
-        const { lock, unlockTime, lockedAmount, owner } = await loadFixture(
-          deployOneYearLockFixture
-        );
+    it("Should execute a transaction when quorum is reached", async function () {
+      const { multisig, owner, otherAccount, thirdAccount } = await loadFixture(deployMultisigFixture);
+      const value = hre.ethers.parseEther("1");
+      await multisig.addFunds({ value });
 
-        await time.increaseTo(unlockTime);
+      await multisig.createTransaction(thirdAccount.address, value, "0x");
+      await multisig.confirmTransaction(1);
+      await multisig.connect(otherAccount).confirmTransaction(1);
 
-        await expect(lock.withdraw()).to.changeEtherBalances(
-          [owner, lock],
-          [lockedAmount, -lockedAmount]
-        );
-      });
+      await expect(multisig.executeTransaction(1))
+        .to.emit(multisig, "TransactionExecuted")
+        .withArgs(1);
+
+      const transaction = await multisig.transactions(1);
+      expect(transaction.executed).to.be.true;
+      expect(await hre.ethers.provider.getBalance(thirdAccount.address)).to.equal(hre.ethers.parseEther("10001"));
     });
   });
+
+
 });
